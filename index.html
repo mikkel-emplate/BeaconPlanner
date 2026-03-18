@@ -1,0 +1,1149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Beacon Placement Tool</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-slate-50 m-0 p-0 overflow-hidden">
+    <div id="root"></div>
+    
+    <script type="text/babel" data-type="module">
+        import React, { useState, useRef } from 'https://esm.sh/react@18.2.0';
+        import { createRoot } from 'https://esm.sh/react-dom@18.2.0/client';
+        import { Upload, MapPin, Trash2, CheckCircle, Download, Settings, AlertCircle, Wand2, Plus, Layers, ArrowRight, PenTool, X, Sparkles, Eraser } from 'https://esm.sh/lucide-react@0.294.0';
+
+        function App() {
+          // Multi-floor state with Step tracking and paths
+          const [floors, setFloors] = useState([
+            { id: 'floor-1', name: 'Floor 1', image: null, beacons: [], step: 1, calibIds: null, paths: [] }
+          ]);
+          const [activeFloorId, setActiveFloorId] = useState('floor-1');
+          
+          // Global Settings State
+          const [mallName, setMallName] = useState('');
+          const [mallId, setMallId] = useState('');
+          const [shopCount, setShopCount] = useState('');
+          const [manualOrderAmount, setManualOrderAmount] = useState('');
+          
+          const [isExporting, setIsExporting] = useState(false);
+          const [isDetecting, setIsDetecting] = useState(false);
+          
+          // Validation for Global Settings
+          const isSettingsValid = mallName.trim() !== '' && mallId.trim() !== '' && shopCount !== '' && Number(shopCount) > 0;
+
+          // Order Amount Calculations
+          const totalBeacons = floors.reduce((acc, f) => acc + f.beacons.length, 0);
+          const autoOrderAmount = totalBeacons > 0 ? Math.ceil(totalBeacons / 20) * 20 : 0;
+          const displayOrderAmount = manualOrderAmount !== '' ? manualOrderAmount : autoOrderAmount;
+          const targetBeacons = Math.ceil(Number(shopCount) * 0.40);
+
+          // Drawing & Dragging states
+          const [isDrawingMode, setIsDrawingMode] = useState(false);
+          const [isErasingMode, setIsErasingMode] = useState(false);
+          const [currentPath, setCurrentPath] = useState([]);
+          const [draggingId, setDraggingId] = useState(null);
+          const [dragStartPos, setDragStartPos] = useState(null);
+          const floorRefs = useRef({});
+          const isPointerDownRef = useRef(false);
+
+          // Derived state for the active floor
+          const activeFloor = floors.find(f => f.id === activeFloorId) || floors[0];
+
+          const updateActiveFloor = (updates) => {
+            setFloors(prev => prev.map(f => f.id === activeFloorId ? { ...f, ...updates } : f));
+          };
+
+          const handleAddFloor = () => {
+            const newId = `floor-${Date.now()}`;
+            setFloors(prev => [...prev, { id: newId, name: `Floor ${prev.length + 1}`, image: null, beacons: [], step: 1, calibIds: null, paths: [] }]);
+            setActiveFloorId(newId);
+          };
+
+          const handleRemoveFloor = (e, idToRemove) => {
+            e.stopPropagation();
+            const newFloors = floors.filter(f => f.id !== idToRemove);
+            setFloors(newFloors);
+            if (activeFloorId === idToRemove) {
+                setActiveFloorId(newFloors[0].id);
+                setIsDrawingMode(false);
+                setIsErasingMode(false);
+            }
+          };
+
+          const handleImageUpload = (e) => {
+            const file = e.target.files[0];
+            if (file) {
+              const reader = new FileReader();
+              reader.onload = (event) => {
+                updateActiveFloor({ image: event.target.result, beacons: [], step: 1, calibIds: null, paths: [] });
+              };
+              reader.readAsDataURL(file);
+            }
+          };
+
+          const addBeacon = (e) => {
+            if (!isSettingsValid || !activeFloor.image || !floorRefs.current[activeFloorId]) return;
+
+            const rect = floorRefs.current[activeFloorId].getBoundingClientRect();
+            const x = ((e.clientX - rect.left) / rect.width) * 100;
+            const y = ((e.clientY - rect.top) / rect.height) * 100;
+
+            const newBeacon = {
+              id: `beacon-${Date.now()}`,
+              x,
+              y,
+              code: `BCN-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`,
+              stepAdded: activeFloor.step 
+            };
+
+            updateActiveFloor({ beacons: [...activeFloor.beacons, newBeacon] });
+          };
+
+          const erasePathsAt = (x, y) => {
+              const eraseRadius = 2.5; // 2.5% radius for the eraser
+              
+              setFloors(prevFloors => {
+                  return prevFloors.map(floor => {
+                      if (floor.id !== activeFloorId) return floor;
+                      
+                      let anyErased = false;
+                      const newPaths = [];
+                      
+                      (floor.paths || []).forEach(path => {
+                          let currentSubPath = [];
+                          path.forEach(pt => {
+                              if (Math.hypot(pt.x - x, pt.y - y) > eraseRadius) {
+                                  currentSubPath.push(pt);
+                              } else {
+                                  anyErased = true;
+                                  if (currentSubPath.length > 0) {
+                                      newPaths.push(currentSubPath);
+                                      currentSubPath = [];
+                                  }
+                              }
+                          });
+                          if (currentSubPath.length > 0) {
+                              newPaths.push(currentSubPath);
+                          }
+                      });
+                      
+                      // Keep only segments that have at least a line (2 points)
+                      if (anyErased) {
+                          return { ...floor, paths: newPaths.filter(p => p.length > 1) };
+                      }
+                      return floor;
+                  });
+              });
+          };
+
+          // --- Map Event Handlers for Drawing, Dragging & Clicks ---
+          const handleMapPointerDown = (e) => {
+            if (!isSettingsValid) return;
+            isPointerDownRef.current = true;
+
+            if (activeFloor.step === 3) {
+                const rect = floorRefs.current[activeFloorId].getBoundingClientRect();
+                const x = ((e.clientX - rect.left) / rect.width) * 100;
+                const y = ((e.clientY - rect.top) / rect.height) * 100;
+
+                if (isDrawingMode) {
+                    setCurrentPath([{x, y}]);
+                    e.currentTarget.setPointerCapture(e.pointerId);
+                    return;
+                }
+                if (isErasingMode) {
+                    erasePathsAt(x, y);
+                    e.currentTarget.setPointerCapture(e.pointerId);
+                    return;
+                }
+            }
+            setDragStartPos({ x: e.clientX, y: e.clientY });
+          };
+
+          const handleMapPointerMove = (e) => {
+            if (!isSettingsValid) return;
+
+            if (activeFloor.step === 3 && isPointerDownRef.current) {
+                const rect = floorRefs.current[activeFloorId].getBoundingClientRect();
+                let x = ((e.clientX - rect.left) / rect.width) * 100;
+                let y = ((e.clientY - rect.top) / rect.height) * 100;
+                x = Math.max(0, Math.min(100, x));
+                y = Math.max(0, Math.min(100, y));
+
+                if (isDrawingMode && currentPath.length > 0) {
+                    const lastPoint = currentPath[currentPath.length - 1];
+                    if (Math.abs(x - lastPoint.x) > 0.5 || Math.abs(y - lastPoint.y) > 0.5) {
+                        setCurrentPath(prev => [...prev, {x, y}]);
+                    }
+                    return;
+                }
+
+                if (isErasingMode) {
+                    erasePathsAt(x, y);
+                    return;
+                }
+            }
+
+            if (draggingId && floorRefs.current[activeFloorId]) {
+              const rect = floorRefs.current[activeFloorId].getBoundingClientRect();
+              let x = ((e.clientX - rect.left) / rect.width) * 100;
+              let y = ((e.clientY - rect.top) / rect.height) * 100;
+
+              x = Math.max(0, Math.min(100, x));
+              y = Math.max(0, Math.min(100, y));
+
+              updateActiveFloor({
+                beacons: activeFloor.beacons.map(b => b.id === draggingId ? { ...b, x, y } : b)
+              });
+            }
+          };
+
+          const handleMapPointerUp = (e) => {
+            if (!isSettingsValid) return;
+            isPointerDownRef.current = false;
+
+            if (activeFloor.step === 3) {
+                if (isDrawingMode && currentPath.length > 0) {
+                    updateActiveFloor({ paths: [...(activeFloor.paths || []), currentPath] });
+                    setCurrentPath([]);
+                    e.currentTarget.releasePointerCapture(e.pointerId);
+                    return;
+                }
+                if (isErasingMode) {
+                    e.currentTarget.releasePointerCapture(e.pointerId);
+                    return;
+                }
+            }
+
+            if (draggingId) {
+              setDraggingId(null);
+              return;
+            }
+
+            if (dragStartPos) {
+              const dx = e.clientX - dragStartPos.x;
+              const dy = e.clientY - dragStartPos.y;
+              if (Math.abs(dx) < 3 && Math.abs(dy) < 3) {
+                  addBeacon(e);
+              }
+            }
+            setDragStartPos(null);
+          };
+
+          const handleBeaconPointerDown = (e, id) => {
+            if (!isSettingsValid || isDrawingMode || isErasingMode) return; 
+            e.stopPropagation();
+            setDraggingId(id);
+            e.currentTarget.setPointerCapture(e.pointerId); 
+          };
+
+          // --- Auto-Detect Corridors (A* Pathfinding to Entrances) ---
+          const triggerAutoDetect = () => {
+              if (!isSettingsValid) return;
+              setIsDetecting(true);
+              setTimeout(handleAutoDetectCorridors, 50); 
+          };
+
+          const handleAutoDetectCorridors = () => {
+              if (!activeFloor.image || !floorRefs.current[activeFloorId]) return;
+
+              const entrances = activeFloor.beacons.filter(b => b.stepAdded === 1);
+              const calibs = activeFloor.beacons.filter(b => b.stepAdded === 2);
+
+              if (calibs.length === 0 || entrances.length === 0) {
+                  alert("Need at least 1 entrance and calibration beacons placed!");
+                  setIsDetecting(false);
+                  return;
+              }
+
+              const img = new Image();
+              img.onload = () => {
+                  const MAX_DIM = 200; 
+                  let scale = 1;
+                  if (img.width > MAX_DIM || img.height > MAX_DIM) {
+                      scale = Math.min(MAX_DIM / img.width, MAX_DIM / img.height);
+                  }
+                  const width = Math.floor(img.width * scale);
+                  const height = Math.floor(img.height * scale);
+
+                  const canvas = document.createElement('canvas');
+                  canvas.width = width;
+                  canvas.height = height;
+                  const ctx = canvas.getContext('2d');
+                  ctx.drawImage(img, 0, 0, width, height);
+                  const data = ctx.getImageData(0, 0, width, height).data;
+
+                  const hub = calibs[0];
+                  const hubX = Math.floor((hub.x / 100) * width);
+                  const hubY = Math.floor((hub.y / 100) * height);
+                  const hubIdx = (hubY * width + hubX) * 4;
+                  const refR = data[hubIdx], refG = data[hubIdx+1], refB = data[hubIdx+2];
+
+                  const costMap = new Float32Array(width * height);
+                  for (let i = 0; i < width * height; i++) {
+                      const px = i * 4;
+                      const dist = Math.sqrt(
+                          Math.pow(data[px] - refR, 2) + Math.pow(data[px+1] - refG, 2) + Math.pow(data[px+2] - refB, 2)
+                      );
+                      costMap[i] = dist < 45 ? 1 : 100;
+                  }
+
+                  const newPaths = [];
+
+                  const findPath = (sx, sy, ex, ey) => {
+                      const size = width * height;
+                      const gScore = new Float32Array(size).fill(Infinity);
+                      const fScore = new Float32Array(size).fill(Infinity);
+                      const prev = new Int32Array(size).fill(-1);
+                      const openSet = new Set();
+
+                      const startIdx = sy * width + sx;
+                      const endIdx = ey * width + ex;
+
+                      gScore[startIdx] = 0;
+                      fScore[startIdx] = Math.hypot(ex - sx, ey - sy);
+                      openSet.add(startIdx);
+
+                      let iterations = 0;
+                      while(openSet.size > 0 && iterations < 30000) { 
+                          iterations++;
+                          let current = -1;
+                          let lowestF = Infinity;
+                          for (let idx of openSet) {
+                              if (fScore[idx] < lowestF) {
+                                  lowestF = fScore[idx];
+                                  current = idx;
+                              }
+                          }
+
+                          if (current === endIdx || Math.hypot((current%width)-ex, Math.floor(current/width)-ey) < 2) {
+                              const path = [];
+                              let curr = current;
+                              while(curr !== -1) {
+                                  path.push({ x: (curr % width) / width * 100, y: Math.floor(curr / width) / height * 100 });
+                                  curr = prev[curr];
+                              }
+                              return path.reverse();
+                          }
+
+                          openSet.delete(current);
+                          const cx = current % width;
+                          const cy = Math.floor(current / width);
+
+                          const dirs = [[0,-1],[0,1],[-1,0],[1,0], [-1,-1],[1,-1],[-1,1],[1,1]];
+                          for (let [dx, dy] of dirs) {
+                              const nx = cx + dx;
+                              const ny = cy + dy;
+                              if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                                  const nIdx = ny * width + nx;
+                                  const isDiag = (dx !== 0 && dy !== 0);
+                                  const cost = costMap[nIdx] * (isDiag ? 1.414 : 1);
+                                  const tentative_g = gScore[current] + cost;
+
+                                  if (tentative_g < gScore[nIdx]) {
+                                      prev[nIdx] = current;
+                                      gScore[nIdx] = tentative_g;
+                                      fScore[nIdx] = tentative_g + Math.hypot(ex - nx, ey - ny);
+                                      openSet.add(nIdx);
+                                  }
+                              }
+                          }
+                      }
+                      return [];
+                  };
+
+                  const targets = [...entrances];
+                  if (calibs.length > 1) targets.push(calibs[1]);
+
+                  targets.forEach(t => {
+                      const tx = Math.floor((t.x / 100) * width);
+                      const ty = Math.floor((t.y / 100) * height);
+                      const p = findPath(hubX, hubY, tx, ty);
+                      if (p.length > 0) newPaths.push(p);
+                  });
+
+                  updateActiveFloor({ paths: [...(activeFloor.paths || []), ...newPaths] });
+                  setIsDetecting(false);
+              };
+              img.src = activeFloor.image;
+          };
+
+          // --- Generate Beacons along drawn paths ---
+          const handleGenerateFromPaths = () => {
+            if (!isSettingsValid) return;
+            setIsDrawingMode(false);
+            setIsErasingMode(false);
+            
+            if (!activeFloor.image || !floorRefs.current[activeFloorId]) return;
+            if (!(activeFloor.paths && activeFloor.paths.length > 0)) {
+                alert("Please map out at least one corridor line first!");
+                return;
+            }
+
+            const b1 = activeFloor.beacons.find(b => b.id === activeFloor.calibIds?.[0]);
+            const b2 = activeFloor.beacons.find(b => b.id === activeFloor.calibIds?.[1]);
+
+            if (!b1 || !b2) {
+              alert("Calibration beacons are missing or were deleted. Reverting to Step 2.");
+              updateActiveFloor({ step: 2, calibIds: null });
+              return;
+            }
+
+            const img = new Image();
+            img.onload = () => {
+                const MAX_DIM = 800; 
+                let scale = 1;
+                if (img.width > MAX_DIM || img.height > MAX_DIM) {
+                    scale = Math.min(MAX_DIM / img.width, MAX_DIM / img.height);
+                }
+                const width = Math.floor(img.width * scale);
+                const height = Math.floor(img.height * scale);
+
+                const canvas = document.createElement('canvas');
+                canvas.width = width;
+                canvas.height = height;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0, width, height);
+                const data = ctx.getImageData(0, 0, width, height).data;
+
+                const hubX = Math.floor((b1.x / 100) * width);
+                const hubY = Math.floor((b1.y / 100) * height);
+                const hubIdx = (hubY * width + hubX) * 4;
+                const refR = data[hubIdx], refG = data[hubIdx+1], refB = data[hubIdx+2];
+
+                const isWalkable = new Uint8Array(width * height);
+                for (let i = 0; i < width * height; i++) {
+                    const px = i * 4;
+                    const dist = Math.sqrt(
+                        Math.pow(data[px] - refR, 2) +
+                        Math.pow(data[px+1] - refG, 2) +
+                        Math.pow(data[px+2] - refB, 2)
+                    );
+                    isWalkable[i] = dist < 40 ? 1 : 0;
+                }
+
+                const b1PxX = (b1.x / 100) * width;
+                const b1PxY = (b1.y / 100) * height;
+                const b2PxX = (b2.x / 100) * width;
+                const b2PxY = (b2.y / 100) * height;
+                const userTargetSpacingPx = Math.hypot(b2PxX - b1PxX, b2PxY - b1PxY);
+
+                const targetCount = Math.ceil(Number(shopCount) * 0.40);
+                let currentCount = floors.reduce((acc, f) => acc + f.beacons.length, 0);
+
+                const newBeacons = [];
+                const allPlaced = activeFloor.beacons.map(b => ({
+                    cx: (b.x / 100) * width,
+                    cy: (b.y / 100) * height
+                }));
+
+                let toggleSide = true;
+
+                for (const path of activeFloor.paths) {
+                    let accumulated = userTargetSpacingPx;
+
+                    for (let i = 1; i < path.length; i++) {
+                        if (currentCount >= targetCount) break;
+
+                        const p1 = path[i-1];
+                        const p2 = path[i];
+
+                        const px1 = { x: (p1.x / 100) * width, y: (p1.y / 100) * height };
+                        const px2 = { x: (p2.x / 100) * width, y: (p2.y / 100) * height };
+
+                        const dx = px2.x - px1.x;
+                        const dy = px2.y - px1.y;
+                        const segDist = Math.hypot(dx, dy);
+
+                        if (segDist === 0) continue;
+
+                        const normX = dx / segDist;
+                        const normY = dy / segDist;
+
+                        let remainingSegDist = segDist;
+                        let curX = px1.x;
+                        let curY = px1.y;
+
+                        while (accumulated + remainingSegDist >= userTargetSpacingPx && currentCount < targetCount) {
+                            const needed = userTargetSpacingPx - accumulated;
+                            const ratio = needed / remainingSegDist;
+
+                            curX = curX + (px2.x - curX) * ratio;
+                            curY = curY + (px2.y - curY) * ratio;
+
+                            let tooClose = false;
+                            for (const b of allPlaced) {
+                                if (Math.hypot(b.cx - curX, b.cy - curY) < userTargetSpacingPx * 0.7) {
+                                    tooClose = true;
+                                    break;
+                                }
+                            }
+
+                            if (!tooClose) {
+                                let wallX = curX;
+                                let wallY = curY;
+                                
+                                const perpX = toggleSide ? -normY : normY;
+                                const perpY = toggleSide ? normX : -normX;
+                                toggleSide = !toggleSide; 
+
+                                const maxSearch = width * 0.15; 
+                                for (let dist = 1; dist < maxSearch; dist++) {
+                                    const checkX = Math.round(curX + perpX * dist);
+                                    const checkY = Math.round(curY + perpY * dist);
+                                    if (checkX >= 0 && checkX < width && checkY >= 0 && checkY < height) {
+                                        if (isWalkable[checkY * width + checkX] === 0) {
+                                            wallX = checkX;
+                                            wallY = checkY;
+                                            break;
+                                        }
+                                    } else {
+                                        break;
+                                    }
+                                }
+
+                                newBeacons.push({
+                                    id: `beacon-${Math.random().toString(36).substr(2, 9)}`,
+                                    x: (wallX / width) * 100,
+                                    y: (wallY / height) * 100,
+                                    code: `BCN-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`,
+                                    stepAdded: 3
+                                });
+                                allPlaced.push({ cx: curX, cy: curY });
+                                currentCount++;
+                            }
+
+                            remainingSegDist -= needed;
+                            accumulated = 0;
+                        }
+                        accumulated += remainingSegDist;
+                    }
+                }
+
+                updateActiveFloor({
+                    beacons: [...activeFloor.beacons, ...newBeacons],
+                    paths: []
+                });
+            };
+            img.src = activeFloor.image;
+          };
+
+          const removeBeacon = (e, id) => {
+            e.stopPropagation();
+            updateActiveFloor({ beacons: activeFloor.beacons.filter(b => b.id !== id) });
+          };
+
+          const clearAll = () => {
+            updateActiveFloor({ beacons: [], step: 1, calibIds: null, paths: [] });
+            setIsDrawingMode(false);
+            setIsErasingMode(false);
+          };
+
+          const exportToPDF = async () => {
+            if (!isSettingsValid) return;
+            const validFloors = floors.filter(f => f.image && f.beacons.length > 0);
+            if (validFloors.length === 0) return;
+
+            // Prepare and Open Gmail Draft IMMEDIATELY (Synchronously) to bypass pop-up blockers
+            const subject = encodeURIComponent(`Beacon Order Specification - ${mallName || 'New Mall'} (${mallId || 'ID'})`);
+            const bodyText = `Hi Paweł\n\nI would like to order some more beacons. Here is the specification:\n\n- ${displayOrderAmount} "Anchor Beacon 2"\n\n- The unique ID + a QR code referring to the unique ID on the front (covering the existing mac address QR code).\n\n- Configured as:\n-- iBeacons with the default Kontakt.io UUID\n-- Major: ${mallId || '[insert mall id]'}\n-- Tx Power: 4\n-- Interval: 625ms\n\nShip to:\nShopping Center name: ${mallName}\nAddress: \nContact person:\nE-mail: \nPhone number:`;
+            
+            const mailtoLink = `https://mail.google.com/mail/?view=cm&fs=1&to=p.wawrzuta@kontakt.io&su=${subject}&body=${encodeURIComponent(bodyText)}`;
+            window.open(mailtoLink, '_blank');
+
+            try {
+              setIsExporting(true);
+              
+              // Give React a tick to render offscreen hidden floors
+              await new Promise(r => setTimeout(r, 200));
+
+              const html2canvas = (await import('https://esm.sh/html2canvas@1.4.1')).default;
+              const { jsPDF } = await import('https://esm.sh/jspdf@2.5.1');
+
+              const pdf = new jsPDF({
+                  orientation: 'portrait',
+                  unit: 'mm',
+                  format: 'a4'
+              });
+
+              // --- GENERATE TEMPLATE PAGE 1 ---
+              pdf.setFont("helvetica", "bold");
+              pdf.setFontSize(16);
+              pdf.text("Beacon setup process", 20, 20);
+
+              let yPos = 32;
+
+              pdf.setFontSize(12);
+              pdf.text("Technical setup:", 20, yPos);
+              yPos += 7;
+
+              pdf.setFont("helvetica", "normal");
+              pdf.setFontSize(10);
+
+              // Helper function to auto-wrap and indent bullets based on level
+              const writeBullet = (text, y, level = 1) => {
+                  const bulletX = level === 1 ? 25 : 32;
+                  const textX = level === 1 ? 29 : 36;
+                  const bulletChar = level === 1 ? "•" : "-";
+                  const lines = pdf.splitTextToSize(text, 210 - textX - 20);
+                  pdf.text(bulletChar, bulletX, y);
+                  pdf.text(lines, textX, y);
+                  return y + (lines.length * 5); // 5mm spacing per line
+              };
+
+              yPos = writeBullet("Range of signal: Emplate standard is approx. 30 m. (Beacon powerlevel 4)", yPos, 1);
+              yPos += 1;
+              yPos = writeBullet("Ready to use: The beacons are ready to use when you receive them. No actions needed.", yPos, 1);
+
+              yPos += 6;
+              pdf.setFont("helvetica", "bold");
+              pdf.setFontSize(12);
+              pdf.text("Beacon placement:", 20, yPos);
+              yPos += 7;
+
+              pdf.setFont("helvetica", "normal");
+              pdf.setFontSize(10);
+              pdf.text("The beacons must cover the area of the shopping center.", 20, yPos);
+              yPos += 7;
+
+              yPos = writeBullet("Entrances: All entrances must have a beacon. Includes entrance from parking lots etc.", yPos, 1);
+              yPos += 3;
+
+              yPos = writeBullet("General coverage: Every 2nd/3rd shop (20-30 meters apart) will have a beacon placed to make sure all common areas of the shopping center are covered.", yPos, 1);
+              yPos += 3;
+
+              yPos = writeBullet("Special areas: Open areas like playgrounds, ice skating fields - make sure to cover the common areas so your customers are within the range of the signal.", yPos, 1);
+              yPos += 6;
+
+              yPos = writeBullet("The beacons are ready to be sticked to the wall out of reach for customers - just take off the layer of the double sided tape.", yPos, 1);
+              yPos += 1;
+              
+              yPos = writeBullet("Place with the unique code down to have easy access later on.", yPos, 2);
+              yPos += 1;
+              yPos = writeBullet("Place beacons out of reach of customers.", yPos, 2);
+              yPos += 2;
+
+              yPos = writeBullet("On every beacon there is a unique code", yPos, 1);
+              yPos += 1;
+              
+              yPos = writeBullet("We will deliver 5 excel files with these unique codes - one file for one mall", yPos, 2);
+              yPos += 1;
+              yPos = writeBullet("Note down in excel sheet the location of each beacon", yPos, 2);
+              yPos += 4;
+
+              pdf.setFont("helvetica", "bold");
+              pdf.text("Example:", 20, yPos);
+              yPos += 4;
+
+              // Example Table
+              pdf.setFillColor(240, 240, 240);
+              pdf.rect(20, yPos, 100, 8, 'F');
+              pdf.setDrawColor(200);
+              pdf.rect(20, yPos, 100, 8);
+              pdf.setFontSize(10);
+              pdf.text("ID", 22, yPos + 5);
+              pdf.text("Location", 72, yPos + 5);
+              yPos += 8;
+
+              pdf.setFont("helvetica", "normal");
+              pdf.rect(20, yPos, 100, 8);
+              pdf.text("13aa05WL", 22, yPos + 5);
+              pdf.text("Zara", 72, yPos + 5);
+              yPos += 8;
+
+              pdf.rect(20, yPos, 100, 8);
+              pdf.text("13aS05WC", 22, yPos + 5);
+              pdf.text("Kids Area", 72, yPos + 5);
+              yPos += 8;
+
+              // Add extra spacing between the table and the final bullet point
+              yPos += 8; 
+
+              yPos = writeBullet("The extra beacons provided can be used to create extra check-in zones, like at the food hall, at shop openings etc.", yPos, 1);
+
+              // --- PAGE 2+ (Floor Plans) ---
+              pdf.addPage();
+              pdf.setFont("helvetica", "bold");
+              pdf.setFontSize(18);
+              pdf.text("Floor plans - Approx. beacon placements", 20, 20);
+
+              // Loop through ALL floors to add them to the PDF
+              for (const floor of validFloors) {
+                  const floorElement = floorRefs.current[floor.id];
+                  if (!floorElement) continue;
+
+                  const canvas = await html2canvas(floorElement, { 
+                    scale: 2, 
+                    useCORS: true,
+                    logging: false
+                  });
+                  
+                  const imgData = canvas.toDataURL('image/jpeg', 0.8);
+                  
+                  const pdfWidth = pdf.internal.pageSize.getWidth();
+                  const pdfHeight = pdf.internal.pageSize.getHeight();
+                  
+                  const imgProps = pdf.getImageProperties(imgData);
+                  const margin = 10;
+                  const maxWidth = pdfWidth - (margin * 2);
+                  const maxHeight = pdfHeight - (margin * 2) - 35; // Leave room for title
+                  
+                  let printWidth = maxWidth;
+                  let printHeight = (imgProps.height * maxWidth) / imgProps.width;
+
+                  if (printHeight > maxHeight) {
+                      printHeight = maxHeight;
+                      printWidth = (imgProps.width * maxHeight) / imgProps.height;
+                  }
+
+                  if (validFloors.indexOf(floor) > 0) {
+                      pdf.addPage();
+                  }
+
+                  pdf.setFont("helvetica", "bold");
+                  pdf.setFontSize(14);
+                  
+                  let titleY = validFloors.indexOf(floor) === 0 ? 35 : 20;
+                  let mapY = validFloors.indexOf(floor) === 0 ? 45 : 30;
+
+                  pdf.text(`Map: ${floor.name}`, margin, titleY);
+
+                  const xOffset = margin + (maxWidth - printWidth) / 2;
+                  pdf.addImage(imgData, 'JPEG', xOffset, mapY, printWidth, printHeight);
+              }
+              
+              pdf.save(`Beacon_Setup_${mallName.replace(/\s+/g, '_') || 'Mall'}.pdf`);
+
+            } catch (error) {
+              console.error("Failed to generate PDF", error);
+              alert("Failed to generate PDF. Please try again.");
+            } finally {
+              setIsExporting(false);
+            }
+          };
+
+          const step2Beacons = activeFloor.beacons.filter(b => b.stepAdded === 2);
+
+          return (
+            <div className="min-h-screen bg-slate-50 flex flex-col md:flex-row font-sans">
+              
+              {/* Sidebar */}
+              <div className="w-full md:w-80 bg-white border-r border-slate-200 shadow-sm flex flex-col h-screen overflow-y-auto z-10">
+                <div className="p-6 border-b border-slate-200">
+                  <h1 className="text-xl font-bold text-slate-800 flex items-center gap-2">
+                    <MapPin className="text-red-500" />
+                    Beacon Setup Tool
+                  </h1>
+                  <p className="text-sm text-slate-500 mt-1">Guided Floor Configuration</p>
+                </div>
+
+                <div className="p-6 border-b border-slate-200 flex-grow">
+                  <h2 className="text-sm font-semibold text-slate-800 uppercase tracking-wider mb-4 flex items-center gap-2">
+                    <Settings className="w-4 h-4" /> Global Settings
+                  </h2>
+                  <div className="space-y-4 mb-8">
+                    <div>
+                      <label className="text-xs font-medium text-slate-600 flex justify-between mb-1">
+                        <span>Shopping center name <span className="text-red-500">*</span></span>
+                      </label>
+                      <input 
+                        type="text" 
+                        placeholder="e.g. Weberzeile"
+                        value={mallName} 
+                        onChange={(e) => setMallName(e.target.value)}
+                        className="w-full px-3 py-2 border border-slate-300 rounded-md text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium text-slate-600 flex justify-between mb-1">
+                        <span>Mall ID <span className="text-red-500">*</span></span>
+                      </label>
+                      <input 
+                        type="text" 
+                        placeholder="e.g. 12345"
+                        value={mallId} 
+                        onChange={(e) => setMallId(e.target.value)}
+                        className="w-full px-3 py-2 border border-slate-300 rounded-md text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium text-slate-600 flex justify-between mb-1">
+                        <span>Total Number of Shops (Entire Mall) <span className="text-red-500">*</span></span>
+                      </label>
+                      <input 
+                        type="number" 
+                        min="1" max="1000" 
+                        placeholder="e.g. 50"
+                        value={shopCount} 
+                        onChange={(e) => setShopCount(e.target.value)}
+                        className="w-full px-3 py-2 border border-slate-300 rounded-md text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                      />
+                      <div className="p-3 bg-indigo-50 rounded border border-indigo-100 mt-3">
+                         <p className="text-xs text-indigo-800 font-medium">
+                           Target Auto-Beacons (40%): <span className="font-bold text-lg ml-1">{targetBeacons}</span>
+                         </p>
+                         <p className="text-[10px] text-indigo-600 mt-1 uppercase font-semibold">
+                           Placed across all floors: {totalBeacons}
+                         </p>
+                      </div>
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium text-slate-600 flex justify-between mb-1">
+                        <span>Total beacons to be ordered</span>
+                      </label>
+                      <input 
+                        type="number" 
+                        value={displayOrderAmount} 
+                        onChange={(e) => setManualOrderAmount(e.target.value)}
+                        className="w-full px-3 py-2 border border-slate-300 rounded-md text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                      />
+                      <p className="text-[10px] text-slate-500 mt-1 leading-tight">Pre-filled to match order brackets of 20 beacons per box. Edit to change.</p>
+                    </div>
+                  </div>
+
+                  <h2 className="text-sm font-semibold text-slate-800 uppercase tracking-wider mb-4">Placement Workflow</h2>
+                  
+                  {!isSettingsValid && (
+                    <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-md flex items-start gap-2">
+                      <AlertCircle className="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0" />
+                      <p className="text-xs text-amber-700">Please complete the mandatory Global Settings above to unlock the workflow.</p>
+                    </div>
+                  )}
+
+                  <div className={!isSettingsValid ? "opacity-50 pointer-events-none select-none transition-opacity" : "transition-opacity"}>
+                    {/* Step 1 Card */}
+                    <div className={`p-4 rounded-lg border mb-4 transition-all ${activeFloor.step === 1 ? 'bg-white border-indigo-300 shadow-md ring-1 ring-indigo-200' : 'bg-slate-50 border-slate-200 opacity-60'}`}>
+                      <div className="flex justify-between items-center mb-1">
+                        <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                          <span className={`w-5 h-5 rounded-full flex items-center justify-center text-xs text-white ${activeFloor.step === 1 ? 'bg-indigo-600' : (activeFloor.step > 1 ? 'bg-emerald-500' : 'bg-slate-400')}`}>1</span>
+                          Mark Entrances
+                        </h3>
+                        {activeFloor.step > 1 && (
+                            <button onClick={() => { updateActiveFloor({ step: 1 }); setIsDrawingMode(false); setIsErasingMode(false); }} className="text-xs font-medium text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded transition-colors">Edit</button>
+                        )}
+                      </div>
+                      <p className="text-xs text-slate-600 mb-4 pl-7">Click on the map to manually place beacons at all main doors and parking access points.</p>
+                      {activeFloor.step === 1 && (
+                        <button 
+                          onClick={() => updateActiveFloor({ step: 2 })}
+                          className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-md text-sm font-medium flex items-center justify-center gap-2 transition-colors"
+                        >
+                          Task Completed <ArrowRight className="w-4 h-4" />
+                        </button>
+                      )}
+                      {activeFloor.step > 1 && (
+                        <div className="pl-7 text-xs font-medium text-emerald-600 flex items-center gap-1"><CheckCircle className="w-3 h-3"/> Completed</div>
+                      )}
+                    </div>
+
+                    {/* Step 2 Card */}
+                    <div className={`p-4 rounded-lg border mb-4 transition-all ${activeFloor.step === 2 ? 'bg-white border-indigo-300 shadow-md ring-1 ring-indigo-200' : 'bg-slate-50 border-slate-200 opacity-60'}`}>
+                      <div className="flex justify-between items-center mb-1">
+                        <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                          <span className={`w-5 h-5 rounded-full flex items-center justify-center text-xs text-white ${activeFloor.step === 2 ? 'bg-indigo-600' : (activeFloor.step > 2 ? 'bg-emerald-500' : 'bg-slate-300')}`}>2</span>
+                          Calibrate Distance
+                        </h3>
+                        {activeFloor.step > 2 && (
+                            <button onClick={() => { updateActiveFloor({ step: 2 }); setIsDrawingMode(false); setIsErasingMode(false); }} className="text-xs font-medium text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded transition-colors">Edit</button>
+                        )}
+                      </div>
+                      <p className="text-xs text-slate-600 mb-3 pl-7">Place exactly 2 beacons in a corridor. The distance between them sets the rule for Auto-Placement.</p>
+                      
+                      {activeFloor.step === 2 && (
+                        <>
+                          <div className="pl-7 mb-3 text-xs font-medium text-indigo-600">
+                            Beacons placed this step: {step2Beacons.length} / 2
+                          </div>
+                          <button 
+                            onClick={() => {
+                              updateActiveFloor({ 
+                                step: 3, 
+                                calibIds: [step2Beacons[0].id, step2Beacons[1].id] 
+                              });
+                            }}
+                            disabled={step2Beacons.length < 2}
+                            className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white rounded-md text-sm font-medium flex items-center justify-center gap-2 transition-colors"
+                          >
+                            Task Completed <ArrowRight className="w-4 h-4" />
+                          </button>
+                        </>
+                      )}
+                      {activeFloor.step > 2 && (
+                        <div className="pl-7 text-xs font-medium text-emerald-600 flex items-center gap-1"><CheckCircle className="w-3 h-3"/> Completed</div>
+                      )}
+                    </div>
+
+                    {/* Step 3 Card */}
+                    <div className={`p-4 rounded-lg border mb-4 transition-all ${activeFloor.step === 3 ? 'bg-white border-emerald-300 shadow-md ring-1 ring-emerald-200' : 'bg-slate-50 border-slate-200 opacity-60'}`}>
+                      <div className="flex justify-between items-center mb-1">
+                        <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                          <span className={`w-5 h-5 rounded-full flex items-center justify-center text-xs text-white ${activeFloor.step === 3 ? 'bg-emerald-600' : 'bg-slate-300'}`}>3</span>
+                          Map Corridors
+                        </h3>
+                      </div>
+                      <p className="text-xs text-slate-600 mb-4 pl-7">Auto-detect routes linking your entrances, or draw lines manually. The tool spaces beacons evenly on the lines.</p>
+                      {activeFloor.step === 3 && (
+                        <div className="space-y-2">
+                          <button 
+                            onClick={triggerAutoDetect}
+                            disabled={isDetecting}
+                            className="w-full py-2 px-4 text-emerald-700 bg-emerald-100 hover:bg-emerald-200 rounded-lg transition-colors flex items-center justify-center gap-2 font-medium text-sm shadow-sm border border-emerald-300"
+                          >
+                            <Sparkles className="w-4 h-4" /> {isDetecting ? 'Calculating...' : 'Auto-Detect Corridors'}
+                          </button>
+
+                          <div className="relative py-2">
+                            <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-slate-200"></div></div>
+                            <div className="relative flex justify-center"><span className="bg-white px-2 text-[10px] text-slate-400 uppercase font-bold">OR</span></div>
+                          </div>
+
+                          <div className="flex gap-2">
+                            <button 
+                              onClick={() => { setIsDrawingMode(!isDrawingMode); setIsErasingMode(false); }}
+                              className={`flex-1 py-2 px-2 text-white rounded-lg transition-colors flex items-center justify-center gap-2 font-medium text-xs shadow-sm ${isDrawingMode ? 'bg-orange-500 hover:bg-orange-600 ring-2 ring-offset-1 ring-orange-500' : 'bg-slate-600 hover:bg-slate-700'}`}
+                            >
+                              <PenTool className="w-4 h-4" /> {isDrawingMode ? 'Stop Drawing' : 'Draw'}
+                            </button>
+                            
+                            <button 
+                              onClick={() => { setIsErasingMode(!isErasingMode); setIsDrawingMode(false); }}
+                              disabled={!(activeFloor.paths?.length > 0)}
+                              className={`flex-1 py-2 px-2 text-white rounded-lg transition-colors flex items-center justify-center gap-2 font-medium text-xs shadow-sm ${isErasingMode ? 'bg-red-500 hover:bg-red-600 ring-2 ring-offset-1 ring-red-500' : 'bg-slate-600 hover:bg-slate-700'} disabled:opacity-50 disabled:cursor-not-allowed`}
+                            >
+                              <Eraser className="w-4 h-4" /> {isErasingMode ? 'Stop Erasing' : 'Erase'}
+                            </button>
+                          </div>
+                          
+                          {activeFloor.paths?.length > 0 && (
+                            <button 
+                              onClick={handleGenerateFromPaths}
+                              className="w-full py-3 mt-4 px-4 text-white rounded-lg transition-colors flex items-center justify-center gap-2 font-bold text-sm shadow-md bg-emerald-600 hover:bg-emerald-700 border border-emerald-800"
+                            >
+                              <Wand2 className="w-4 h-4" /> Generate Beacons
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="p-6 bg-slate-50 space-y-3 border-t border-slate-200">
+                  <button 
+                    onClick={clearAll}
+                    disabled={activeFloor.beacons.length === 0}
+                    className="w-full py-2 px-4 bg-white border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 font-medium text-sm shadow-sm"
+                  >
+                    <Trash2 className="w-4 h-4" /> Clear Current Floor
+                  </button>
+                  
+                  <button 
+                    onClick={exportToPDF}
+                    disabled={totalBeacons === 0 || !isSettingsValid || isExporting}
+                    className="w-full py-2 px-4 bg-slate-800 text-white rounded-lg hover:bg-slate-900 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 font-medium text-sm shadow-sm"
+                  >
+                    <Download className="w-4 h-4" /> {isExporting ? 'Generating & Emailing...' : 'Export PDF & Create order draft'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Main Content Area */}
+              <div className="flex-1 bg-slate-100 flex flex-col h-screen overflow-hidden">
+                
+                {/* Floor Tabs */}
+                <div className="bg-white border-b border-slate-200 px-4 py-2 flex items-center gap-2 overflow-x-auto shadow-sm z-20">
+                  <Layers className="w-5 h-5 text-slate-400 mr-2 flex-shrink-0" />
+                  {floors.map(floor => (
+                    <div key={floor.id} className={`flex items-center rounded-full border transition-colors ${floor.id === activeFloorId ? 'bg-indigo-100 border-indigo-200' : 'bg-slate-50 border-slate-200 hover:bg-slate-100'}`}>
+                      <button
+                        onClick={() => {
+                          setActiveFloorId(floor.id);
+                          setIsDrawingMode(false);
+                          setIsErasingMode(false);
+                        }}
+                        className={`px-3 py-1.5 text-sm font-medium whitespace-nowrap ${floor.id === activeFloorId ? 'text-indigo-700' : 'text-slate-600'}`}
+                      >
+                        {floor.name} 
+                        <span className="ml-2 bg-white px-1.5 py-0.5 rounded-full text-[10px] text-slate-500 border border-slate-200">
+                          {floor.beacons.length}
+                        </span>
+                      </button>
+                      {floors.length > 1 && (
+                          <button 
+                            onClick={(e) => handleRemoveFloor(e, floor.id)}
+                            className="pr-2 pl-1 py-1.5 text-slate-400 hover:text-red-500 transition-colors"
+                            title="Delete Floor"
+                          >
+                              <X className="w-3 h-3" />
+                          </button>
+                      )}
+                    </div>
+                  ))}
+                  <button 
+                    onClick={handleAddFloor}
+                    className="px-3 py-1.5 rounded-full text-sm font-medium text-slate-500 hover:bg-slate-200 transition-colors flex items-center gap-1 border border-transparent whitespace-nowrap ml-2"
+                  >
+                    <Plus className="w-4 h-4" /> Add Floor
+                  </button>
+                </div>
+
+                {/* Canvas Area */}
+                {!activeFloor.image ? (
+                  <div className="flex-1 flex items-center justify-center p-8 overflow-y-auto">
+                    <div className="max-w-md w-full bg-white rounded-2xl shadow-sm border border-slate-200 p-8 text-center">
+                      <div className="w-16 h-16 bg-indigo-50 text-indigo-500 rounded-full flex items-center justify-center mx-auto mb-4">
+                        <Upload className="w-8 h-8" />
+                      </div>
+                      <h2 className="text-xl font-bold text-slate-800 mb-2">Upload Map for {activeFloor.name}</h2>
+                      <p className="text-slate-500 text-sm mb-6">
+                        Take a screenshot of this specific floor plan and upload it here.
+                      </p>
+                      <label className="inline-flex items-center justify-center px-6 py-3 bg-indigo-600 text-white font-medium rounded-lg hover:bg-indigo-700 transition-colors cursor-pointer w-full shadow-sm">
+                        Choose Image File
+                        <input 
+                          type="file" 
+                          accept="image/*" 
+                          onChange={handleImageUpload} 
+                          className="hidden" 
+                        />
+                      </label>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex-1 overflow-auto p-4 pt-16 md:p-8 md:pt-20 flex items-start justify-center touch-none relative">
+                    
+                    {/* Map Information Bar (Fixed to view above active map) */}
+                    <div className="absolute top-4 left-0 right-0 flex justify-center items-center px-2 z-30 pointer-events-none">
+                        {!isSettingsValid ? (
+                        <div className="flex items-center gap-2 text-slate-700 font-medium bg-amber-50 px-4 py-2 rounded-full shadow-sm border border-amber-200 pointer-events-auto">
+                            <AlertCircle className="w-4 h-4 text-amber-500" />
+                            <span className="text-sm">Complete Global Settings in the sidebar to start</span>
+                        </div>
+                        ) : isErasingMode ? (
+                        <div className="flex items-center gap-2 text-white font-medium bg-red-500 px-4 py-2 rounded-full shadow-lg animate-bounce pointer-events-auto">
+                            <Eraser className="w-4 h-4" />
+                            <span className="text-sm">Click and drag over lines to erase them</span>
+                        </div>
+                        ) : isDrawingMode ? (
+                        <div className="flex items-center gap-2 text-white font-medium bg-orange-500 px-4 py-2 rounded-full shadow-lg animate-bounce pointer-events-auto">
+                            <PenTool className="w-4 h-4" />
+                            <span className="text-sm">Click and drag to draw lines along the corridors</span>
+                        </div>
+                        ) : (
+                        <div className="flex items-center gap-2 text-slate-700 font-medium bg-white px-4 py-2 rounded-full shadow-sm border border-slate-200 pointer-events-auto">
+                            <AlertCircle className="w-4 h-4 text-indigo-500" />
+                            <span className="text-sm">
+                            {activeFloor.step === 1 && "Step 1: Click map to mark all entrances"}
+                            {activeFloor.step === 2 && "Step 2: Place 2 beacons in a corridor to set spacing"}
+                            {activeFloor.step === 3 && "Step 3: Click 'Auto-Detect' or 'Draw Corridors' in the sidebar"}
+                            </span>
+                        </div>
+                        )}
+                    </div>
+
+                    {/* Loop to render ALL active and offscreen maps for PDF export */}
+                    {floors.map((floor) => {
+                      if (!floor.image) return null;
+
+                      return (
+                        <div
+                            key={floor.id}
+                            style={{
+                                display: (activeFloorId === floor.id || isExporting) ? 'block' : 'none',
+                                position: (isExporting && activeFloorId !== floor.id) ? 'absolute' : 'relative',
+                                top: (isExporting && activeFloorId !== floor.id) ? '-10000px' : 'auto',
+                                left: (isExporting && activeFloorId !== floor.id) ? '-10000px' : 'auto'
+                            }}
+                            className="relative inline-block bg-white shadow-md border border-slate-200 select-none"
+                        >
+                            <div 
+                                ref={(el) => floorRefs.current[floor.id] = el}
+                                className={`relative overflow-hidden touch-none ${!isSettingsValid ? 'cursor-not-allowed' : (isDrawingMode || isErasingMode) && activeFloorId === floor.id ? 'cursor-crosshair' : (draggingId ? 'cursor-grabbing' : 'cursor-crosshair')}`}
+                                onPointerDown={(e) => activeFloorId === floor.id && handleMapPointerDown(e)}
+                                onPointerMove={(e) => activeFloorId === floor.id && handleMapPointerMove(e)}
+                                onPointerUp={(e) => activeFloorId === floor.id && handleMapPointerUp(e)}
+                                onPointerLeave={(e) => activeFloorId === floor.id && handleMapPointerUp(e)}
+                            >
+                                <img 
+                                src={floor.image} 
+                                alt="Mall Map" 
+                                className={`max-w-full h-auto block pointer-events-none transition-opacity ${!isSettingsValid && activeFloorId === floor.id ? 'opacity-50 grayscale-[0.5]' : ''}`}
+                                draggable={false}
+                                style={{ maxHeight: '75vh' }}
+                                />
+
+                                {/* SVG Drawing Layer */}
+                                <svg className={`absolute inset-0 w-full h-full pointer-events-none z-10 ${!isSettingsValid && activeFloorId === floor.id ? 'opacity-50' : ''}`} viewBox="0 0 100 100" preserveAspectRatio="none">
+                                {(floor.paths || []).map((path, i) => (
+                                    <polyline
+                                    key={i}
+                                    points={path.map(p => `${p.x},${p.y}`).join(' ')}
+                                    stroke="rgba(16, 185, 129, 0.6)" 
+                                    strokeWidth="0.8" 
+                                    fill="none"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    />
+                                ))}
+                                {activeFloorId === floor.id && currentPath.length > 0 && (
+                                    <polyline
+                                    points={currentPath.map(p => `${p.x},${p.y}`).join(' ')}
+                                    stroke="rgba(249, 115, 22, 0.9)" 
+                                    strokeWidth="0.8"
+                                    fill="none"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    />
+                                )}
+                                </svg>
+
+                                {/* Render Beacons */}
+                                {floor.beacons.map((beacon) => (
+                                <div 
+                                    key={beacon.id}
+                                    className={`absolute group ${isDrawingMode && activeFloorId === floor.id ? 'pointer-events-none' : ''} ${draggingId === beacon.id && activeFloorId === floor.id ? 'z-50 cursor-grabbing scale-110' : 'z-20 cursor-grab hover:scale-110 hover:z-30'} transition-transform touch-none`}
+                                    style={{ 
+                                    left: `${beacon.x}%`, 
+                                    top: `${beacon.y}%`,
+                                    transform: 'translate(-50%, -50%)',
+                                    padding: '10px' 
+                                    }}
+                                    onPointerDown={(e) => activeFloorId === floor.id && handleBeaconPointerDown(e, beacon.id)}
+                                >
+                                    <div className={`w-4 h-4 ${beacon.stepAdded === 1 ? 'bg-indigo-500' : 'bg-red-600'} rounded-full shadow-md border-2 border-white flex items-center justify-center ${draggingId === beacon.id && activeFloorId === floor.id ? 'shadow-lg ring-2 ring-red-400/50' : ''}`}>
+                                        <div className="w-1.5 h-1.5 bg-white rounded-full"></div>
+                                    </div>
+
+                                    {draggingId !== beacon.id && isSettingsValid && activeFloorId === floor.id && (
+                                    <div className="absolute top-full left-1/2 -translate-x-1/2 mt-1 bg-slate-800 text-white text-[10px] font-medium py-1 px-2 rounded opacity-0 group-hover:opacity-100 transition-opacity z-30 flex items-center gap-2 whitespace-nowrap shadow-xl">
+                                        <span>{beacon.code}</span>
+                                        <button 
+                                        onPointerDown={(e) => removeBeacon(e, beacon.id)}
+                                        className="text-red-400 hover:text-red-300 p-0.5 cursor-pointer"
+                                        title="Remove"
+                                        >
+                                        <Trash2 className="w-3 h-3" />
+                                        </button>
+                                    </div>
+                                    )}
+                                </div>
+                                ))}
+                            </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        }
+
+        const root = createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
