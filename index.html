@@ -551,7 +551,7 @@
             const subject = encodeURIComponent(`Beacon Order Specification - ${mallName || 'New Mall'} (${mallId || 'ID'})`);
             const bodyText = `Hi Paweł\n\nI would like to order some more beacons. Here is the specification:\n\n- ${displayOrderAmount} "Anchor Beacon 2"\n\n- The unique ID + a QR code referring to the unique ID on the front (covering the existing mac address QR code).\n\n- Configured as:\n-- iBeacons with the default Kontakt.io UUID\n-- Major: ${mallId || '[insert mall id]'}\n-- Tx Power: 4\n-- Interval: 625ms\n\nShip to:\nShopping Center name: ${mallName}\nAddress: \nContact person:\nE-mail: \nPhone number:`;
             
-            const mailtoLink = `https://mail.google.com/mail/?view=cm&fs=1&to=p.wawrzuta@kontakt.io&su=${subject}&body=${encodeURIComponent(bodyText)}`;
+            const mailtoLink = `https://mail.google.com/mail/?view=cm&fs=1&su=${subject}&body=${encodeURIComponent(bodyText)}`;
             window.open(mailtoLink, '_blank');
 
             try {
@@ -751,7 +751,7 @@
                       </label>
                       <input 
                         type="text" 
-                        placeholder="e.g. Wondermall"
+                        placeholder="e.g. Weberzeile"
                         value={mallName} 
                         onChange={(e) => setMallName(e.target.value)}
                         className="w-full px-3 py-2 border border-slate-300 rounded-md text-sm outline-none focus:ring-2 focus:ring-indigo-500"
